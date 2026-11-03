@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Table, Button, Space, Tag, Modal, Form, Input, InputNumber, Upload, Image, Select, Spin, Checkbox, App, Tooltip } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
 import { CheckOutlined, CloseOutlined, UploadOutlined, EyeOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { getAllReloadRecords, verifyReloadRecord, rejectReloadRecord, createReloadRecord } from '../../services/firebase/reload';
 import dayjs from 'dayjs';
@@ -13,6 +14,7 @@ import { useAuthStore } from '../../store/modules';
 import type { ReloadRecord, Store, User } from '../../types';
 import StoreSelect from '../common/StoreSelect';
 import { netReloadPoints } from '../../utils/reloadPoints';
+import { getReloadDisplayStatus, reloadStatusQuery, type ReloadStatusFilter } from '../../utils/reloadStatus';
 
 interface ReloadVerificationProps {
   onRefresh?: () => void;
@@ -22,7 +24,7 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
   const { message } = App.useApp();
   const [loading, setLoading] = useState(false);
   const [records, setRecords] = useState<ReloadRecord[]>([]);
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'completed' | 'rejected'>('all');
+  const [statusFilter, setStatusFilter] = useState<ReloadStatusFilter>('all');
   const [verifyModalVisible, setVerifyModalVisible] = useState(false);
   const [rejectModalVisible, setRejectModalVisible] = useState(false);
   const [manualCreateVisible, setManualCreateVisible] = useState(false);
@@ -99,9 +101,8 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
   const loadRecords = async () => {
     setLoading(true);
     try {
-      const filter = statusFilter === 'all' ? undefined : statusFilter;
-      const allRecords = await getAllReloadRecords(filter);
-      setRecords(allRecords);
+      const allRecords = await getAllReloadRecords(reloadStatusQuery(statusFilter));
+      setRecords(statusFilter === 'all' ? allRecords : allRecords.filter(record => getReloadDisplayStatus(record) === statusFilter));
     } catch (error: any) {
       console.error('[ReloadVerification] 加载充值记录失败:', error);
       message.error(t('pointsConfig.reloadVerification.loadFailed') + ': ' + (error.message || t('common.unknownError')));
@@ -242,61 +243,75 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
     }
   };
 
-  const renderStatus = (status: string) => {
+  const renderStatus = (record: ReloadRecord) => {
+    const status = getReloadDisplayStatus(record);
     const statusMap: Record<string, { color: string; text: string }> = {
       pending: { color: 'orange', text: t('pointsConfig.reloadVerification.statusPending') },
       completed: { color: 'green', text: t('pointsConfig.reloadVerification.statusCompleted') },
-      rejected: { color: 'red', text: t('pointsConfig.reloadVerification.statusRejected') }
+      rejected: { color: 'red', text: t('pointsConfig.reloadVerification.statusRejected') },
+      withdrawn: { color: 'default', text: t('pointsConfig.reloadVerification.statusWithdrawed') }
     };
     const statusInfo = statusMap[status] || { color: 'default', text: status };
     return <Tag color={statusInfo.color}>{statusInfo.text}</Tag>;
   };
 
-  const columns = [
+  const columns: ColumnsType<ReloadRecord> = [
     {
       title: t('pointsConfig.reloadVerification.time'),
       dataIndex: 'createdAt',
       key: 'createdAt',
-      width: 180,
-      render: (date: Date) => dayjs(date).format(i18n.language === 'en-US' ? 'D MMM, YYYY HH:mm' : 'YYYY-MM-DD HH:mm')
+      width: 126,
+      render: (date: Date) => <div className="reload-verification-desktop-date">
+        <span>{dayjs(date).format(i18n.language === 'en-US' ? 'D MMM YYYY' : 'YYYY-MM-DD')}</span>
+        <span className="reload-verification-desktop-secondary">{dayjs(date).format('HH:mm')}</span>
+      </div>
     },
     {
       title: t('pointsConfig.reloadVerification.user'),
       dataIndex: 'userName',
       key: 'userName',
-      width: 150,
+      width: 160,
       ellipsis: true,
       render: (name: string, record: ReloadRecord) => (
-        <div style={{ overflowWrap: 'anywhere' }}>
-          <div title={name || recordUsers[record.userId]?.displayName || record.userId}>{name || recordUsers[record.userId]?.displayName || record.userId}</div>
-          <div style={{ fontSize: 12, color: '#999', marginTop: 4 }}>{memberPhone(record)}</div>
+        <div>
+          <div className="reload-verification-desktop-ellipsis" title={name || recordUsers[record.userId]?.displayName || record.userId}>{name || recordUsers[record.userId]?.displayName || record.userId}</div>
+          <div className="reload-verification-desktop-secondary">{memberPhone(record)}</div>
         </div>
       )
+    },
+    {
+      title: t('common.status'),
+      key: 'status',
+      width: 112,
+      render: (_: unknown, record: ReloadRecord) => renderStatus(record)
     },
     {
       title: t('pointsConfig.reloadVerification.store'),
       dataIndex: 'storeId',
       key: 'storeId',
-      width: 150,
+      width: 148,
       ellipsis: true,
       render: (storeId: string) => {
         const store = stores.find(s => s.id === storeId);
-        return store?.name || '-';
+        return <span className="reload-verification-desktop-ellipsis" title={store?.name}>{store?.name || '-'}</span>;
       }
     },
     {
       title: t('pointsConfig.reloadVerification.amount'),
       dataIndex: 'requestedAmount',
       key: 'requestedAmount',
-      width: 150,
+      width: 224,
       render: (amount: number, record: ReloadRecord) => (
-        <div>
-          <div>{amount} RM</div>
-          {record.membershipOrderId && <Tag color="gold">{t(`annualPassPayment.${record.paymentPurpose === 'initial_package' ? 'initialPackageLabel' : 'renewalReloadLabel'}`)}</Tag>}
-          {record.membershipOrderId && <div>{t('annualPassPayment.reviewBreakdown', {
-            reload: record.walletAmount, fee: record.annualFeeAmount,
-          })}</div>}
-          <div style={{ fontSize: 12, color: '#999' }}>
+        <div className="reload-verification-desktop-payment">
+          <div className="reload-verification-desktop-amount"><span>RM</span> {amount}</div>
+          {record.membershipOrderId && <>
+            <div className="reload-verification-desktop-package">{t(`annualPassPayment.${record.paymentPurpose === 'initial_package' ? 'initialPackageLabel' : 'renewalReloadLabel'}`)}</div>
+            <div className="reload-verification-desktop-breakdown">
+              <span>{t('pointsConfig.reloadVerification.mobileReload')} RM {record.walletAmount ?? '-'}</span>
+              <span>{t('pointsConfig.reloadVerification.mobileAnnualFee')} RM {record.annualFeeAmount ?? '-'}</span>
+            </div>
+          </>}
+          <div className="reload-verification-desktop-secondary">
             {t(record.status === 'completed' ? 'pointsConfig.reloadVerification.pointsEquivalent' : 'pointsConfig.reloadVerification.estimatedPointsEquivalent', { points: netReloadPoints(record) })}
           </div>
         </div>
@@ -305,25 +320,22 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
     {
       title: t('pointsConfig.reloadVerification.reviewer', { defaultValue: 'Reviewed By' }),
       key: 'reviewer',
-      width: 160,
+      width: 132,
       ellipsis: true,
       render: (_: unknown, record: ReloadRecord) => (
-        <div>
-          <div title={reviewerName(record)} style={{ overflowWrap: 'anywhere' }}>{reviewerName(record)}</div>
-          <div style={{ marginTop: 6 }}>{renderStatus(record.status)}</div>
-        </div>
+        <span className="reload-verification-desktop-ellipsis" title={reviewerName(record)}>{reviewerName(record)}</span>
       )
     },
     {
       title: t('pointsConfig.reloadVerification.adminNotes'),
       dataIndex: 'adminNotes',
       key: 'adminNotes',
-      width: 180,
+      width: 160,
       render: (notes: string, record: ReloadRecord) => {
         const proof = record.verificationProof;
         const notePreview = (
           <Tooltip title={notes || undefined}>
-            <div style={{ maxWidth: 148, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{notes || '-'}</div>
+            <div className="reload-verification-desktop-ellipsis">{notes || '-'}</div>
           </Tooltip>
         );
         if (!proof) return notePreview;
@@ -375,43 +387,30 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
     {
       title: t('pointsConfig.reloadVerification.action'),
       key: 'action',
-      width: 200,
-      render: (_: any, record: ReloadRecord) => (
-        <Space>
+      width: 96,
+      fixed: 'right',
+      render: (_: unknown, record: ReloadRecord) => record.status === 'pending' ? (
+        <Space size={8} className="reload-verification-desktop-actions">
+          <Tooltip title={t('pointsConfig.reloadVerification.verify')}>
           <Button
+            type="primary"
             size="small"
             icon={<CheckOutlined />}
+            aria-label={t('pointsConfig.reloadVerification.verify')}
             onClick={() => handleVerify(record)}
-            disabled={record.status !== 'pending'}
-            style={{
-              background: record.status === 'pending' 
-                ? 'linear-gradient(to right, #FDE08D, #C48D3A)' 
-                : 'rgba(255, 255, 255, 0.1)',
-              border: 'none',
-              color: record.status === 'pending' ? '#111' : 'rgba(255, 255, 255, 0.5)',
-              fontWeight: 700
-            }}
-          >
-            {t('pointsConfig.reloadVerification.verify')}
-          </Button>
+          />
+          </Tooltip>
+          <Tooltip title={t('pointsConfig.reloadVerification.reject')}>
           <Button
+            danger
             size="small"
             icon={<CloseOutlined />}
+            aria-label={t('pointsConfig.reloadVerification.reject')}
             onClick={() => handleReject(record)}
-            disabled={record.status !== 'pending'}
-            style={{
-              background: record.status === 'pending' 
-                ? 'rgba(255, 77, 79, 0.8)' 
-                : 'rgba(255, 255, 255, 0.1)',
-              border: 'none',
-              color: record.status === 'pending' ? '#FFFFFF' : 'rgba(255, 255, 255, 0.5)',
-              fontWeight: 700
-            }}
-          >
-            {t('pointsConfig.reloadVerification.reject')}
-          </Button>
+          />
+          </Tooltip>
         </Space>
-      )
+      ) : <span className="reload-verification-desktop-secondary">-</span>
     }
   ];
 
@@ -420,12 +419,14 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
       <div className="reload-verification-toolbar">
         <Select
           value={statusFilter}
+          aria-label={t('common.status')}
           onChange={(value) => setStatusFilter(value)}
           options={[
             { label: t('pointsConfig.reloadVerification.statusAll'), value: 'all' },
             { label: t('pointsConfig.reloadVerification.statusPending'), value: 'pending' },
             { label: t('pointsConfig.reloadVerification.statusCompleted'), value: 'completed' },
-            { label: t('pointsConfig.reloadVerification.statusRejected'), value: 'rejected' }
+            { label: t('pointsConfig.reloadVerification.statusRejected'), value: 'rejected' },
+            { label: t('pointsConfig.reloadVerification.statusWithdrawed'), value: 'withdrawn' }
           ]}
           className="points-config-form reload-verification-filter"
         />
@@ -467,7 +468,7 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
         </div>
       </div>
       {!isMobile ? (
-        <div className="points-config-form">
+        <div className="points-config-form reload-verification-desktop">
       <Table
         size="small"
         tableLayout="fixed"
@@ -475,7 +476,7 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
         dataSource={records}
         rowKey="id"
         loading={loading}
-        scroll={{ x: 1170 }}
+        scroll={{ x: 1158 }}
         pagination={{
           pageSize: 20,
           showSizeChanger: true
@@ -486,7 +487,7 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
           />
         </div>
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div className="reload-verification-mobile-list">
           {loading ? (
             <div style={{ textAlign: 'center', padding: '40px 20px', color: 'rgba(255, 255, 255, 0.6)' }}>
               <Spin />
@@ -497,13 +498,6 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
             </div>
           ) : (
             records.map((record) => {
-              const statusMap: Record<string, { color: string; text: string }> = {
-                pending: { color: '#fb923c', text: t('pointsConfig.reloadVerification.statusPending') },
-                completed: { color: '#34d399', text: t('pointsConfig.reloadVerification.statusCompleted') },
-                rejected: { color: '#f87171', text: t('pointsConfig.reloadVerification.statusRejected') }
-              };
-              const statusInfo = statusMap[record.status] || { color: '#9ca3af', text: record.status };
-
               const createdDate = record.createdAt instanceof Date
                 ? record.createdAt
                 : (record.createdAt as any)?.toDate
@@ -514,50 +508,47 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
                 <div
                   key={record.id}
                   className="reload-verification-mobile-card"
-                  style={{
-                    border: '1px solid rgba(244,175,37,0.2)',
-                    borderRadius: 12,
-                    padding: 12,
-                    background: 'rgba(34,28,16,0.5)',
-                    backdropFilter: 'blur(10px)'
-                  }}
                 >
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
-                    <div style={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.85)', marginBottom: 4 }}>
+                  <div className="reload-verification-mobile-header">
+                    <div className="reload-verification-mobile-identity">
+                      <div className="reload-verification-mobile-name">
                         {record.userName || record.userId.substring(0, 20)}
                       </div>
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginBottom: 4, overflowWrap: 'anywhere' }}>
+                      <div className="reload-verification-mobile-secondary">
                         {memberPhone(record)}
                       </div>
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>
+                      <time className="reload-verification-mobile-secondary">
                         {dayjs(createdDate).format(i18n.language === 'en-US' ? 'D MMM, YYYY HH:mm' : 'YYYY-MM-DD HH:mm')}
-                      </div>
+                      </time>
                     </div>
-                    <div style={{ textAlign: 'right', marginLeft: 12, maxWidth: '48%', overflowWrap: 'anywhere' }}>
-                      <div style={{ fontSize: 18, fontWeight: 700, color: '#f4af25', marginBottom: 4 }}>
-                        {record.requestedAmount} RM
+                    <div className="reload-verification-mobile-summary">
+                      <div className="reload-verification-mobile-amount">
+                        <span>RM</span> {record.requestedAmount}
                       </div>
-                      {record.membershipOrderId && <div style={{ marginBottom: 6 }}>
-                        <Tag color="gold">{t(`annualPassPayment.${record.paymentPurpose === 'initial_package' ? 'initialPackageLabel' : 'renewalReloadLabel'}`)}</Tag>
-                        {t('annualPassPayment.reviewBreakdown', { reload: record.walletAmount, fee: record.annualFeeAmount })}
-                      </div>}
-                      <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.6)', marginBottom: 6 }}>
-                        {t(record.status === 'completed' ? 'pointsConfig.reloadVerification.pointsEquivalent' : 'pointsConfig.reloadVerification.estimatedPointsEquivalent', { points: netReloadPoints(record) })}
-                      </div>
-                      <div style={{
-                        fontSize: 11,
-                        padding: '2px 8px',
-                        borderRadius: 4,
-                        background: statusInfo.color === '#fb923c' ? 'rgba(251,146,60,0.2)' :
-                          statusInfo.color === '#34d399' ? 'rgba(52,211,153,0.2)' :
-                          'rgba(248,113,113,0.2)',
-                        color: statusInfo.color,
-                        fontWeight: 600,
-                        marginBottom: 8
-                      }}>
-                        {statusInfo.text}
-                      </div>
+                      {renderStatus(record)}
+                    </div>
+                  </div>
+                  {record.membershipOrderId && <div className="reload-verification-mobile-package">
+                    <div className="reload-verification-mobile-package-name">
+                      {t(`annualPassPayment.${record.paymentPurpose === 'initial_package' ? 'initialPackageLabel' : 'renewalReloadLabel'}`)}
+                    </div>
+                    <div className="reload-verification-mobile-breakdown">
+                      <span>{t('pointsConfig.reloadVerification.mobileReload')} <strong>RM {record.walletAmount ?? '-'}</strong></span>
+                      <span>{t('pointsConfig.reloadVerification.mobileAnnualFee')} <strong>RM {record.annualFeeAmount ?? '-'}</strong></span>
+                    </div>
+                  </div>}
+                  <div className="reload-verification-mobile-points">
+                    {t(record.status === 'completed' ? 'pointsConfig.reloadVerification.pointsEquivalent' : 'pointsConfig.reloadVerification.estimatedPointsEquivalent', { points: netReloadPoints(record) })}
+                  </div>
+                  <dl className="reload-verification-mobile-details">
+                    <dt>{t('pointsConfig.reloadVerification.store')}</dt>
+                    <dd>{stores.find(s => s.id === record.storeId)?.name || '-'}</dd>
+                    {record.status !== 'pending' && <>
+                      <dt>{t('pointsConfig.reloadVerification.reviewer', { defaultValue: 'Reviewed By' })}</dt>
+                      <dd>{reviewerName(record)}</dd>
+                    </>}
+                  </dl>
+                  {record.adminNotes && <div className="reload-verification-mobile-notes">{record.adminNotes}</div>}
                       {record.verificationProof && (
                         <Button
                           type="link"
@@ -600,32 +591,15 @@ export const ReloadVerification: React.FC<ReloadVerificationProps> = ({ onRefres
                           {t('pointsConfig.reloadVerification.view')}
                         </Button>
                       )}
-                    </div>
-                  </div>
-                  <div style={{ fontSize: 12, color: '#f4af25', overflowWrap: 'anywhere' }}>
-                    {t('pointsConfig.reloadVerification.store')}: {stores.find(s => s.id === record.storeId)?.name || '-'}
-                  </div>
-                  {record.status !== 'pending' && (
-                    <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 4, overflowWrap: 'anywhere' }}>
-                      {t('pointsConfig.reloadVerification.reviewer', { defaultValue: 'Reviewed By' })}: {reviewerName(record)}
-                    </div>
-                  )}
-                  {record.adminNotes && (
-                    <Tooltip title={record.adminNotes}>
-                      <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.5)', marginTop: 6, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {record.adminNotes}
-                      </div>
-                    </Tooltip>
-                  )}
                   {record.status === 'pending' && (
-                    <div style={{ display: 'flex', gap: 8, marginTop: 8, paddingTop: 8, borderTop: '1px solid rgba(244,175,37,0.1)' }}>
+                    <div className="reload-verification-mobile-review-actions">
                       <Button
                         size="small"
                         icon={<CheckOutlined />}
                         onClick={() => handleVerify(record)}
                         style={{
                           flex: 1,
-                          background: 'linear-gradient(to right, #FDE08D, #C48D3A)',
+                          background: 'var(--cigar-gradient-gold)',
                           border: 'none',
                           color: '#111',
                           fontWeight: 700

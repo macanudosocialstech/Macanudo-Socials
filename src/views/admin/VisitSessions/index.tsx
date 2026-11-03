@@ -1,13 +1,10 @@
 // 驻店记录管理页面
 import React, { useCallback, useEffect, useState, useMemo } from 'react';
-import { Alert, Table, Button, Space, Tag, Modal, Input, Typography, App, Form, Select, InputNumber, Spin, Tabs, Empty, Pagination, Grid, Tooltip } from 'antd';
+import { Alert, Table, Button, Space, Tag, Modal, Input, Typography, App, Form, Select, InputNumber, Spin, Tabs, Empty, Pagination, Grid, Tooltip, DatePicker } from 'antd';
 import { useFirestoreQuery, useFirestoreDoc } from '../../../hooks/useFirestoreQuery';
 import { ReloadOutlined, CheckOutlined, ClockCircleOutlined, QrcodeOutlined, GiftOutlined, PlusOutlined, DeleteOutlined, EditOutlined } from '@ant-design/icons';
 import {
-  getUserVisitSessions,
-  getAllPendingVisitSessions,
-  getAllVisitSessions,
-  getExpiredVisitSessions,
+  getVisitSessionsPage,
   completeVisitSession,
   addRedemptionToSession
 } from '../../../services/firebase/visitSessions';
@@ -16,7 +13,7 @@ import { getCigars, getDocument, COLLECTIONS } from '../../../services/firebase/
 import { getUserDisplayNames } from '../../../services/firebase/userDisplayNames';
 import { useVirtualTableScroll } from '../../../hooks/useVirtualTableScroll';
 import { getAllStores } from '../../../services/firebase/stores';
-import { createRedemptionRecord, updateRedemptionRecord, getRedemptionRecordsBySession, getAllRedemptionRecords } from '../../../services/firebase/redemption';
+import { createRedemptionRecord, updateRedemptionRecord, getRedemptionRecordsBySession, getRedemptionRecordsPage } from '../../../services/firebase/redemption';
 import { useAuthStore } from '../../../store/modules/auth';
 import { isFeatureVisible } from '../../../services/firebase/featureVisibility';
 import { useDetailDrawer } from '../../../hooks/useDetailDrawer';
@@ -29,6 +26,8 @@ import { RoomManagement } from '../../../components/admin/RoomManagement';
 import CigarSelect from './CigarSelect';
 import { sortVisitSessions } from '../../../utils/visitSessionSort';
 import { compareRedemptionsPendingFirst } from '../../../utils/redemptionSort';
+import { useCursorPage } from './useCursorPage';
+import { paginationText } from './paginationMessages';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
@@ -64,6 +63,10 @@ const VisitSessionsPage: React.FC = () => {
   const { modal, message } = App.useApp(); // 使用 App.useApp() 获取 modal 实例以支持 React 19
   const [form] = Form.useForm();
   const [searchUserId, setSearchUserId] = useState<string>('');
+  const [activeTab, setActiveTab] = useState('sessions');
+  const [visitPageSize, setVisitPageSize] = useState(20);
+  const [redemptionPageSize, setRedemptionPageSize] = useState(20);
+  const [visitDates, setVisitDates] = useState<[Date | undefined, Date | undefined]>([undefined, undefined]);
 
   // 不再使用服务端分页，改为加载所有数据并使用客户端分页
   const [qrScannerVisible, setQrScannerVisible] = useState(false);
@@ -100,31 +103,24 @@ const VisitSessionsPage: React.FC = () => {
     status: cigarsError ? 'error' as const : undefined,
   };
   const { data: stores = [] } = useFirestoreQuery(getAllStores);
-  const { data: fetchedSessions = [], loading, refresh: refreshSessions } = useFirestoreQuery(
-    () => {
-      if (searchUserId) {
-        const storeId = isSuperAdmin ? undefined : user?.storeId;
-        return getUserVisitSessions(searchUserId, undefined, storeId).then(userSessions =>
-          statusFilter !== 'all' ? userSessions.filter(s => s.status === statusFilter) : userSessions
-        );
-      }
-      if (statusFilter === 'pending') {
-        return getAllPendingVisitSessions(isSuperAdmin ? undefined : user?.storeId);
-      }
-      if (statusFilter === 'all') {
-        const storeId = isSuperAdmin ? undefined : user?.storeId;
-        return Promise.all([getAllVisitSessions(200, storeId), getAllPendingVisitSessions(storeId)])
-          .then(([recent, pending]) => [...new Map([...pending, ...recent].map(session => [session.id, session])).values()]);
-      }
-      return getAllVisitSessions(200, isSuperAdmin ? undefined : user?.storeId).then(allSessions =>
-        allSessions.filter(s => s.status === statusFilter)
-      );
-    },
-    [statusFilter, searchUserId, isSuperAdmin, user?.storeId]
+  const scope = isSuperAdmin ? { allStores: true as const } : { allStores: false as const, storeId: user?.storeId || '' };
+  const scopeKey = JSON.stringify([user?.id, scope]);
+  const visitPages = useCursorPage(
+    (cursor?: Parameters<typeof getVisitSessionsPage>[0]['cursor']) => getVisitSessionsPage({ scope, userId: searchUserId.trim() || undefined, status: statusFilter, pageSize: visitPageSize, from: visitDates[0], to: visitDates[1], cursor }),
+    JSON.stringify([scopeKey, searchUserId.trim(), statusFilter, visitPageSize, visitDates]),
+    !!user?.id,
   );
+  const { records: fetchedSessions, loading, refresh: refreshSessions } = visitPages;
   const sessions = useMemo(() => sortVisitSessions(fetchedSessions), [fetchedSessions]);
   const [addingRedemption, setAddingRedemption] = useState(false);
-  const [allRedemptionRecords, setAllRedemptionRecords] = useState<RedemptionRecord[]>([]);
+  const [redemptionStatus, setRedemptionStatus] = useState<'all' | 'pending' | 'completed'>('all');
+  const [redemptionType, setRedemptionType] = useState<'all' | 'mystery_gift' | 'referral_reward'>('all');
+  const redemptionPages = useCursorPage(
+    (cursor?: Parameters<typeof getRedemptionRecordsPage>[0]['cursor']) => getRedemptionRecordsPage({ scope, status: redemptionStatus, type: redemptionType, pageSize: redemptionPageSize, cursor }),
+    JSON.stringify([scopeKey, redemptionStatus, redemptionType, redemptionPageSize]),
+    !!user?.id && activeTab === 'redemptions',
+  );
+  const allRedemptionRecords = redemptionPages.records;
   const { data: memberPhones } = useFirestoreDoc<Record<string, string>>(
     async () => {
       const ids = [...new Set([...sessions, ...allRedemptionRecords].map(record => record.userId).filter(Boolean))];
@@ -138,10 +134,8 @@ const VisitSessionsPage: React.FC = () => {
   );
   const [redemptionRecords, setRedemptionRecords] = useState<Map<string, any[]>>(new Map());
   const [operatorNames, setOperatorNames] = useState<Record<string, string>>({});
-  const [redemptionRecordsLoading, setRedemptionRecordsLoading] = useState(false);
+  const redemptionRecordsLoading = redemptionPages.loading;
   const [redemptionSearch, setRedemptionSearch] = useState('');
-  const [redemptionStatus, setRedemptionStatus] = useState<'all' | 'pending' | 'completed'>('all');
-  const [redemptionType, setRedemptionType] = useState<'all' | 'mystery_gift' | 'referral_reward'>('all');
   const [redemptionPage, setRedemptionPage] = useState(1);
   const [forceCheckoutForm] = Form.useForm();
   const [expandedSessions, setExpandedSessions] = useState<Set<string>>(new Set());
@@ -188,31 +182,11 @@ const VisitSessionsPage: React.FC = () => {
     return rows;
   }), [sessions]);
 
-  const loadAllRedemptions = useCallback(async () => {
-    setRedemptionRecordsLoading(true);
-    setRedemptionPage(1);
-    try {
-      const records = await getAllRedemptionRecords(isSuperAdmin ? undefined : user?.storeId);
-      setAllRedemptionRecords(records);
-      const bySession = new Map<string, RedemptionRecord[]>();
-      records.forEach(record => {
-        if (!record.visitSessionId) return;
-        const entries = bySession.get(record.visitSessionId) || [];
-        entries.push(record);
-        bySession.set(record.visitSessionId, entries);
-      });
-      setRedemptionRecords(bySession);
-    } catch (error) {
-      console.error('[VisitSessions] Failed to load all redemption records:', error);
-      message.error(t('visitSessions.loadRedemptionRecordsFailed'));
-    } finally {
-      setRedemptionRecordsLoading(false);
-    }
-  }, [isSuperAdmin, message, t, user?.storeId]);
-
+  const loadAllRedemptions = redemptionPages.refresh;
   useEffect(() => {
-    loadAllRedemptions();
-  }, [loadAllRedemptions]);
+    setRedemptionRecords(new Map());
+    setExpandedSessions(new Set());
+  }, [scopeKey, fetchedSessions]);
 
   const filteredAllRedemptions = useMemo(() => {
     const keyword = redemptionSearch.trim().toLowerCase();
@@ -231,7 +205,7 @@ const VisitSessionsPage: React.FC = () => {
 
   useEffect(() => {
     setRedemptionPage(1);
-  }, [redemptionSearch, redemptionStatus, redemptionType]);
+  }, [redemptionSearch, redemptionStatus, redemptionType, allRedemptionRecords]);
 
   const mobileRedemptionPageSize = 8;
   const mobileRedemptions = useMemo(
@@ -600,10 +574,33 @@ const VisitSessionsPage: React.FC = () => {
     }
   ];
 
+  const pageControls = (kind: 'visits' | 'redemptions') => {
+    const state = kind === 'visits' ? visitPages : redemptionPages;
+    const error = state.error;
+    const label = (key: Parameters<typeof paginationText>[2], values = {}) => paginationText(t, i18n.language, key, values);
+    return <Space direction="vertical" style={{ width: '100%', marginBlock: 12 }}>
+      {error && <Alert type="error" showIcon message={label(error.includes('MIGRATION_REQUIRED') ? 'migration' : error.includes('STORE_SCOPE_REQUIRED') ? 'scope' : 'failed')}
+        action={<Button icon={<ReloadOutlined />} loading={state.loading} onClick={state.refresh}>{t('common.retry')}</Button>} />}
+      {!error && <Text type="secondary">{label(kind, { count: state.records.length, size: kind === 'visits' ? visitPageSize : redemptionPageSize })}</Text>}
+      <Space wrap>
+        <Select aria-label={label(kind === 'visits' ? 'visitPageSize' : 'documentPageSize')}
+          value={kind === 'visits' ? visitPageSize : redemptionPageSize}
+          onChange={kind === 'visits' ? setVisitPageSize : setRedemptionPageSize}
+          options={[20, 50, 100].map(value => ({ value, label: `${value} ${label(kind === 'visits' ? 'visitsUnit' : 'documentsUnit')}` }))} />
+        {kind === 'visits' && <DatePicker.RangePicker style={{ maxWidth: '100%' }}
+          onChange={dates => setVisitDates([dates?.[0]?.startOf('day').toDate(), dates?.[1]?.endOf('day').toDate()])} />}
+        <Button disabled={state.loading || state.page === 1} onClick={state.previous}>{label('previous')}</Button>
+        <Text>{label('page', { page: state.page })}</Text>
+        <Button disabled={state.loading || !state.hasNext} onClick={state.next}>{label('next')}</Button>
+      </Space>
+    </Space>;
+  };
+
   return (
     <div style={{ paddingBottom: isMobile ? '80px' : '0' }}>
       <Tabs
         defaultActiveKey="sessions"
+        onChange={setActiveTab}
         className="points-config-form"
         style={{ color: '#fff' }}
         items={[
@@ -613,6 +610,7 @@ const VisitSessionsPage: React.FC = () => {
             children: (
               <div>
                 <Space direction="vertical" size="middle" style={{ width: '100%', minWidth: 0 }}>
+                  {pageControls('visits')}
                   {isMobile ? (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 8 }}>
                       {/* Row 1: Search Input */}
@@ -749,14 +747,7 @@ const VisitSessionsPage: React.FC = () => {
                           loading={loading}
                           virtual={sessionDisplayRows.length > 50}
                           scroll={tableScroll}
-                          pagination={{
-                            pageSize: isMobile ? 10 : 20,
-                            total: sessionDisplayRows.length,
-                            showSizeChanger: true,
-                            showQuickJumper: true,
-                            showTotal: (total, range) => t('common.paginationTotal', { start: range[0], end: range[1], total }),
-                            pageSizeOptions: ['10', '20', '50', '100'],
-                          }}
+                          pagination={false}
                           style={{
                             background: 'transparent'
                           }}
@@ -1159,10 +1150,11 @@ const VisitSessionsPage: React.FC = () => {
             label: <span style={{ fontSize: 16, fontWeight: 700, paddingInline: 8 }}><GiftOutlined /> {t('visitSessions.mysteryGiftRedemptions')}</span>,
             children: (
               <section className="redemptions-panel points-config-form">
+                {pageControls('redemptions')}
                 <div className="redemptions-toolbar">
                   <Search
                     allowClear
-                    placeholder={t('visitSessions.searchRedemptions')}
+                    placeholder={paginationText(t, i18n.language, 'searchPage')}
                     onChange={(event) => setRedemptionSearch(event.target.value)}
                     className="redemptions-search"
                   />
@@ -1212,7 +1204,7 @@ const VisitSessionsPage: React.FC = () => {
                       pagination={{
                         pageSize: 10,
                         showSizeChanger: true,
-                        showTotal: (total, range) => t('common.paginationTotal', { start: range[0], end: range[1], total })
+                        showTotal: (total, range) => paginationText(t, i18n.language, 'localItems', { start: range[0], end: range[1], count: total })
                       }}
                       locale={{ emptyText: t('visitSessions.noRedemptionRecords') }}
                     />
@@ -1225,11 +1217,7 @@ const VisitSessionsPage: React.FC = () => {
                       ) : mobileRedemptions.map((record) => (
                         <article className="redemption-mobile-card" key={record.id}>
                           <div className="redemption-card-head">
-                            <div className="redemption-user-block">
-                              <strong>{record.userName || '-'}</strong>
-                              <span>{memberPhones?.[record.userId] || '-'}</span>
-                              <span>{dayjs(record.redeemedAt).format('DD MMM YYYY, HH:mm')}</span>
-                            </div>
+                            <strong className="redemption-user-name" title={record.userName || '-'}>{record.userName || '-'}</strong>
                             <div className="redemption-card-tags">
                               <Tag color={record.type === 'referral_reward' ? 'purple' : 'gold'}>
                                 {record.type === 'referral_reward'
@@ -1241,7 +1229,27 @@ const VisitSessionsPage: React.FC = () => {
                               </Tag>
                             </div>
                           </div>
-
+                          <div className="redemption-card-meta">
+                            <div className="redemption-user-block">
+                              <span>{memberPhones?.[record.userId] || '-'}</span>
+                              <span>{dayjs(record.redeemedAt).format('DD MMM YYYY, HH:mm')}</span>
+                            </div>
+                            {record.status === 'pending' && (
+                              <Button
+                                className="redemption-card-edit"
+                                size="small"
+                                icon={<EditOutlined />}
+                                onClick={() => {
+                                  const session = sessions.find(item => item.id === record.visitSessionId);
+                                  if (session) openSessionDrawer(session);
+                                  openRedemptionDrawer(record);
+                                  form.setFieldsValue({ cigarId: record.cigarId || undefined, quantity: record.quantity || 1 });
+                                }}
+                              >
+                                {t('common.edit')}
+                              </Button>
+                            )}
+                          </div>
                           <div className="redemption-card-main">
                             <div>
                               <span className="redemption-field-label">{t('visitSessions.cigarName')}</span>
@@ -1254,23 +1262,6 @@ const VisitSessionsPage: React.FC = () => {
                               <strong>{record.quantity} {t('visitSessions.sticks')}</strong>
                             </div>
                           </div>
-
-                          {record.status === 'pending' && (
-                            <div className="redemption-card-foot">
-                              <Button
-                                size="small"
-                                icon={<EditOutlined />}
-                                onClick={() => {
-                                  const session = sessions.find(item => item.id === record.visitSessionId);
-                                  if (session) openSessionDrawer(session);
-                                  openRedemptionDrawer(record);
-                                  form.setFieldsValue({ cigarId: record.cigarId || undefined, quantity: record.quantity || 1 });
-                                }}
-                              >
-                                {t('common.edit')}
-                              </Button>
-                            </div>
-                          )}
                         </article>
                       ))}
                     </div>
@@ -1281,7 +1272,7 @@ const VisitSessionsPage: React.FC = () => {
                         total={filteredAllRedemptions.length}
                         onChange={setRedemptionPage}
                         showSizeChanger={false}
-                        showTotal={(total, range) => t('common.paginationTotal', { start: range[0], end: range[1], total })}
+                        showTotal={(total, range) => paginationText(t, i18n.language, 'localItems', { start: range[0], end: range[1], count: total })}
                         size="small"
                         className="redemptions-mobile-pagination"
                       />
@@ -1541,7 +1532,8 @@ const VisitSessionsPage: React.FC = () => {
               cigar.id,
               cigar.name,
               values.quantity,
-              user.id
+              user.id,
+              selectedRedemptionRecord.visitSessionId
             );
 
             if (!result.success) {

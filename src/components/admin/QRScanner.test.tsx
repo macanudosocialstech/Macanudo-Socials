@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-  records: vi.fn(), stores: vi.fn(),
+  records: vi.fn(), stores: vi.fn(), pending: vi.fn(), checkin: vi.fn(),
   t: (key: string) => key,
   message: { warning: vi.fn(), error: vi.fn(), success: vi.fn() },
   member: { id: 'member', displayName: 'Alice', role: 'member', membership: { points: 200 }, profile: {} },
@@ -29,13 +29,16 @@ vi.mock('../../services/firebase/redemption', () => ({
 }))
 vi.mock('../../services/firebase/visitSessions', () => ({
   calculateVisitDuration: () => 0.5,
-  createVisitSession: vi.fn(), completeVisitSession: vi.fn(),
-  getPendingVisitSession: async () => ({ id: 'visit', storeId: 'lounge', checkInAt: new Date(), redemptions: [] }),
+  createVisitSession: mocks.checkin, completeVisitSession: vi.fn(),
+  getPendingVisitSession: mocks.pending,
 }))
 import { QRScannerView } from './QRScanner'
 
 describe('scanner checkout cigar selection', () => {
   beforeEach(() => {
+    vi.clearAllMocks()
+    mocks.pending.mockResolvedValue({ id: 'visit', storeId: 'lounge', checkInAt: new Date(), redemptions: [] })
+    mocks.checkin.mockReset()
     mocks.records.mockReset().mockResolvedValue([])
     mocks.stores.mockResolvedValue([{ id: 'lounge', name: 'Lounge A' }])
     window.matchMedia = vi.fn().mockReturnValue({ matches: false, addListener: vi.fn(), removeListener: vi.fn(), addEventListener: vi.fn(), removeEventListener: vi.fn() })
@@ -70,5 +73,18 @@ describe('scanner checkout cigar selection', () => {
     await scanMember()
     expect(await screen.findByText('Robusto')).toBeTruthy()
     expect(screen.queryByText('visitSessions.selectCigar')).toBeNull()
+  })
+
+  it('shows the specific check-in failure in the scanner and notification', async () => {
+    mocks.pending.mockResolvedValue(null)
+    mocks.checkin.mockResolvedValue({ success: false, errorCode: 'outside-hours' })
+    render(<QRScannerView active />)
+    await screen.findByText('Lounge A')
+    fireEvent.change(screen.getByPlaceholderText('scanner.memberIdPlaceholder'), { target: { value: 'ABC123' } })
+    fireEvent.click(screen.getByText('scanner.findMember'))
+    fireEvent.click(await screen.findByText('scanner.confirmCheckin'))
+    await screen.findByText('loungeOperations.errors.outside-hours')
+    expect(mocks.message.error).toHaveBeenCalledWith('loungeOperations.errors.outside-hours')
+    expect(mocks.message.error).not.toHaveBeenCalledWith('scanner.checkinFailed')
   })
 })

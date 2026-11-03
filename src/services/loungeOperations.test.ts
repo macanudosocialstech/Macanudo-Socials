@@ -19,6 +19,12 @@ describe('lounge backend response handling', () => {
     mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ success: false, code: 'forbidden' }), { status: 403 }));
     await expect(loungeRequest('status')).rejects.toThrow('loungeOperations.errors.forbidden');
   });
+  it('retains the business error code for check-in callers', async () => {
+    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ success: false, code: 'outside-hours' }), { status: 409 }));
+    await expect(managedCheckin('closed-member', 'closed-lounge')).rejects.toMatchObject({
+      message: 'loungeOperations.errors.outside-hours', code: 'outside-hours',
+    });
+  });
   it('accepts a successful response and sends the authenticated request', async () => {
     mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ success: true, batches: [] }), { status: 200 }));
     expect(await loungeRequest('status', { storeId: 'lounge' })).toEqual({ success: true, batches: [] });

@@ -18,6 +18,7 @@ import {
   onSnapshot,
   documentId,
   startAfter,
+  withMonitoringOperation,
   type QueryDocumentSnapshot,
   type QueryConstraint,
   type Unsubscribe
@@ -26,6 +27,10 @@ import { db } from '../../config/firebase';
 import { GLOBAL_COLLECTIONS } from '../../config/globalCollections';
 import type { RedemptionConfig, RedemptionRecord, RedemptionRecordItem, RedemptionRecordDocument, User } from '../../types';
 import { getRedemptionCooldownSeconds } from '../../utils/redemptionCooldown';
+import i18n from 'i18next';
+import { requireAdminVisitPagination, type AdminStoreScope } from './adminVisitPagination';
+
+const adminStatuses = (items: RedemptionRecordItem[]) => [...new Set(items.map(item => item.status || 'completed'))];
 
 /**
  * 获取兑换配置
@@ -78,20 +83,8 @@ export const updateRedemptionConfig = async (
  * 获取用户累计驻店时长（取消年度重计，计算全期所有完成驻店）
  */
 export const getUserTotalVisitHoursInPeriod = async (userId: string): Promise<number> => {
-  try {
-    // 获取驻店记录
-    const { getUserVisitSessions } = await import('./visitSessions');
-    const sessions = await getUserVisitSessions(userId);
-
-    // 计算所有已完成记录（排除 Day Pass）
-    const totalHours = sessions
-      .filter(s => s.status === 'completed' && s.durationHours && s.checkInType !== 'daypass')
-      .reduce((sum, s) => sum + (s.durationHours || 0), 0);
-    return totalHours;
-  } catch (error) {
-    console.error('[getUserTotalVisitHoursInPeriod] Error:', error);
-    return 0;
-  }
+  const { readReadyCompletedMemberVisitHours } = await import('./visitMemberStats');
+  return readReadyCompletedMemberVisitHours(userId);
 };
 
 /**
@@ -127,7 +120,7 @@ export const getUserRedemptionLimits = async (userId: string): Promise<{
 
     return finalLimits;
   } catch (error) {
-    return { dailyLimit: 3, totalLimit: 25 };
+    throw error;
   }
 };
 
@@ -179,14 +172,14 @@ export const canUserRedeem = async (
 
     // 待处理申请也占用限额，避免多设备同时预支同一份额度。
     const dayKey = (targetDate || new Date()).toISOString().split('T')[0]; // YYYY-MM-DD
-    const dailyRedemptions = await getDailyRedemptions(userId, dayKey);
+    const dailyRedemptions = await getDailyRedemptions(userId, dayKey, { throwOnError: true });
     const dailyCount = dailyRedemptions.reduce((sum, r) => sum + r.quantity, 0);
     if (dailyCount + quantity > limits.dailyLimit) {
       return { canRedeem: false, reason: `今日兑换限额为 ${limits.dailyLimit}，已兑换 ${dailyCount}，剩余 ${limits.dailyLimit - dailyCount}` };
     }
 
     // 检查总限额（包含待处理申请）
-    const totalRedemptions = await getTotalRedemptions(userId);
+    const totalRedemptions = await getTotalRedemptions(userId, { throwOnError: true });
     const totalCount = totalRedemptions.reduce((sum, r) => sum + r.quantity, 0);
     if (totalCount + quantity > limits.totalLimit) {
       return { canRedeem: false, reason: `总兑换限额为 ${limits.totalLimit}，已兑换 ${totalCount}，剩余 ${limits.totalLimit - totalCount}` };
@@ -195,7 +188,7 @@ export const canUserRedeem = async (
     // 检查每小时限额（包含待处理申请）
     const now = targetDate || new Date();
     const hourKey = now.toISOString().split(':')[0]; // YYYY-MM-DDTHH
-    const hourlyRedemptions = await getHourlyRedemptions(userId, hourKey);
+    const hourlyRedemptions = await getHourlyRedemptions(userId, hourKey, { throwOnError: true });
     const hourlyCount = hourlyRedemptions.reduce((sum, r) => sum + r.quantity, 0);
     
     // 如果配置了hourlyLimit，使用配置值；否则默认每小时只能兑换1次
@@ -207,7 +200,7 @@ export const canUserRedeem = async (
 
     return { canRedeem: true };
   } catch (error: any) {
-    return { canRedeem: false, reason: error.message || '检查失败' };
+    return { canRedeem: false, reason: i18n.t('visitTimer.redemptionStatsUnavailable') };
   }
 };
 
@@ -420,13 +413,18 @@ export const createRedemptionRecord = async (
     await runTransaction(db, async (transaction) => {
       const docRef = doc(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS, visitSessionId);
       const docSnap = await transaction.get(docRef);
-      
+      const sessionSnap = await transaction.get(doc(db, GLOBAL_COLLECTIONS.VISIT_SESSIONS, visitSessionId));
+      if (!sessionSnap.exists()) throw new Error('VISIT_SESSION_REQUIRED');
+      const sessionData = sessionSnap.data();
+
       if (docSnap.exists()) {
         // 同时补齐旧版文档缺失的所有权字段。
         transaction.update(docRef, {
           visitSessionId,
           userId,
           userName: userData.displayName,
+          ...(sessionData.storeId ? { storeId: sessionData.storeId } : {}),
+          adminStatuses: adminStatuses([...(docSnap.data().redemptions || []), recordItem]),
           redemptions: arrayUnion(recordItem),
           updatedAt: Timestamp.fromDate(now)
         });
@@ -442,6 +440,8 @@ export const createRedemptionRecord = async (
         };
         transaction.set(docRef, {
           ...newDoc,
+          ...(sessionData.storeId ? { storeId: sessionData.storeId } : {}),
+          adminStatuses: ['completed'],
           createdAt: Timestamp.fromDate(now),
           updatedAt: Timestamp.fromDate(now)
         });
@@ -473,13 +473,16 @@ export const updateRedemptionRecord = async (
   cigarId: string,
   cigarName: string,
   quantity: number,
-  confirmedBy: string
+  confirmedBy: string,
+  visitSessionId?: string
 ): Promise<{ success: boolean; error?: string }> => {
   try {
     // 需要查询所有文档来找到包含该 recordId 的文档
     // 由于无法直接查询数组中的字段，我们需要遍历所有文档
-    const q = query(collection(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS));
-    const snapshot = await getDocs(q);
+    const direct = visitSessionId ? await getDoc(doc(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS, visitSessionId)) : null;
+    const snapshot = direct
+      ? { docs: direct.exists() ? [direct] : [] }
+      : await getDocs(query(collection(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS)));
     
     let foundDoc: { docId: string; data: RedemptionRecordDocument } | null = null;
     let foundItemIndex: number = -1;
@@ -517,6 +520,7 @@ export const updateRedemptionRecord = async (
     const docRef = doc(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS, foundDoc.docId);
     await updateDoc(docRef, {
       redemptions: updatedRedemptions,
+      adminStatuses: adminStatuses(updatedRedemptions),
       updatedAt: Timestamp.fromDate(now)
     });
 
@@ -635,25 +639,80 @@ export const getRedemptionRecordsBySession = async (
  * 获取全部兑换项，供管理员在驻店记录页集中管理。
  * Firestore 文档按 visitSessionId 聚合，因此这里展开每个文档中的 redemptions 数组。
  */
+export interface AdminRedemptionPageOptions {
+  scope: AdminStoreScope;
+  status?: 'all' | 'pending' | 'completed';
+  type?: 'all' | 'mystery_gift' | 'referral_reward';
+  pageSize?: number;
+  cursor?: { phase: number; last?: QueryDocumentSnapshot; key: string };
+}
+
+// A page is bounded by source documents, not array items. Empty filtered pages
+// still have a next cursor: never scan ahead without a user navigation action.
+export const getRedemptionRecordsPage = async (options: AdminRedemptionPageOptions) => {
+  await requireAdminVisitPagination();
+  if (!options.scope.allStores && !options.scope.storeId?.trim()) throw new Error('STORE_SCOPE_REQUIRED');
+  const size = Math.max(1, Math.min(100, Math.floor(options.pageSize || 20)));
+  const status = options.status || 'all';
+  const type = options.type || 'all';
+  const key = JSON.stringify([options.scope, status, type, size]);
+  if (options.cursor && options.cursor.key !== key) throw new Error('CURSOR_SCOPE_MISMATCH');
+  const phases = [
+    ...(type !== 'referral_reward' && status !== 'completed' ? ['pending'] : []),
+    ...(type !== 'referral_reward' && status !== 'pending' ? ['completed'] : []),
+    ...(type !== 'mystery_gift' && status !== 'pending' ? ['referral'] : []),
+  ];
+  const phase = options.cursor?.phase || 0;
+  const source = phases[phase];
+  if (!source) return { records: [] as RedemptionRecord[], next: undefined };
+  const constraints: QueryConstraint[] = [orderBy(documentId()), limit(size + 1)];
+  if (!options.scope.allStores) constraints.push(where('storeId', '==', options.scope.storeId));
+  if (source !== 'referral') constraints.push(where('adminStatuses', 'array-contains', source));
+  if (options.cursor?.last) constraints.push(startAfter(options.cursor.last));
+  const snapshot = await getDocs(withMonitoringOperation(query(collection(db, source === 'referral' ? GLOBAL_COLLECTIONS.USERS : GLOBAL_COLLECTIONS.REDEMPTION_RECORDS), ...constraints), 'redemptions.byStore'));
+  const documents = snapshot.docs.slice(0, size);
+  const records: RedemptionRecord[] = [];
+  for (const entry of documents) {
+    const data = entry.data();
+    if (source === 'referral') {
+      const redeemedAt = data.updatedAt?.toDate?.() || new Date(data.updatedAt || 0);
+      for (const target of data.referral?.redeemedMilestones || []) records.push({
+        id: `referral-reward-${entry.id}-${target}`, userId: entry.id, userName: data.displayName,
+        type: 'referral_reward', cigarId: 'referral_reward', cigarName: `Referral reward (${target} referrals)`,
+        quantity: 1, status: 'completed', dayKey: redeemedAt.toISOString().slice(0, 10),
+        redemptionIndex: 0, redeemedAt, redeemedBy: entry.id, createdAt: redeemedAt,
+        visitSessionId: `referral-reward-${entry.id}`,
+      });
+    } else {
+      for (const item of (data.redemptions || []) as RedemptionRecordItem[]) {
+        if ((item.status || 'completed') !== source) continue;
+        const itemType = item.type || 'mystery_gift';
+        if (type !== 'all' && itemType !== type) continue;
+        const date = (value: any) => value?.toDate?.() || new Date(value);
+        records.push({ ...item, status: item.status || 'completed', type: itemType,
+          visitSessionId: data.visitSessionId || entry.id, redeemedAt: date(item.redeemedAt),
+          createdAt: date(item.createdAt), updatedAt: item.updatedAt ? date(item.updatedAt) : undefined });
+      }
+    }
+  }
+  const next = snapshot.docs.length > size ? { phase, last: documents.at(-1), key }
+    : phase + 1 < phases.length ? { phase: phase + 1, key } : undefined;
+  return { records, next };
+};
+
 export const getAllRedemptionRecords = async (storeId?: string): Promise<RedemptionRecord[]> => {
   try {
-    const snapshot = await getDocs(collection(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS));
-    const usersSnapshot = await getDocs(collection(db, GLOBAL_COLLECTIONS.USERS));
-    const records: RedemptionRecord[] = [];
-    let allowedSessionIds: Set<string> | null = null;
-
-    if (storeId) {
-      const sessionsSnapshot = await getDocs(query(
-        collection(db, GLOBAL_COLLECTIONS.VISIT_SESSIONS),
-        where('storeId', '==', storeId),
-      ));
-      allowedSessionIds = new Set(sessionsSnapshot.docs.map((sessionDoc) => sessionDoc.id));
+    if (storeId !== undefined) {
+      if (!storeId.trim()) throw new Error('STORE_SCOPE_REQUIRED');
+      await requireAdminVisitPagination();
     }
+    const snapshot = await getDocs(withMonitoringOperation(query(collection(db, GLOBAL_COLLECTIONS.REDEMPTION_RECORDS), ...(storeId ? [where('storeId', '==', storeId)] : [])), 'redemptions.byStore'));
+    const usersSnapshot = await getDocs(withMonitoringOperation(query(collection(db, GLOBAL_COLLECTIONS.USERS), ...(storeId ? [where('storeId', '==', storeId)] : [])), 'redemptions.byStore'));
+    const records: RedemptionRecord[] = [];
 
     snapshot.docs.forEach((docSnap) => {
       const data = docSnap.data() as RedemptionRecordDocument;
       const visitSessionId = data.visitSessionId || docSnap.id;
-      if (allowedSessionIds && !allowedSessionIds.has(visitSessionId)) return;
 
       (data.redemptions || []).forEach((item) => {
         const toDate = (value: any): Date => (

@@ -13,6 +13,11 @@ import {
   where, 
   orderBy, 
   limit,
+  withMonitoringOperation,
+  startAfter,
+  documentId,
+  type QueryDocumentSnapshot,
+  type QueryConstraint,
   Timestamp,
   arrayUnion,
   runTransaction,
@@ -28,6 +33,7 @@ import { aggregateCompletedRedemptions, areRedemptionsReadyForSettlement } from 
 import { getRedemptionOrderMonth, resolveRedemptionOrderId } from '../../utils/redemptionOrderId';
 import { calculateRebateReward } from '../../utils/purchaseRewards';
 import { calculateCheckoutAffordability, MINIMUM_RELOAD_AMOUNT_RM } from '../../utils/visitCheckout';
+import { requireAdminVisitPagination, type AdminStoreScope } from './adminVisitPagination';
 
 /**
  * 处理 visit session 数据，转换日期字段和 redemptions
@@ -81,7 +87,7 @@ export const createVisitSession = async (
   storeId: string,
   storeName?: string,
   userName?: string
-): Promise<{ success: boolean; sessionId?: string; error?: string }> => {
+): Promise<{ success: boolean; sessionId?: string; error?: string; errorCode?: string }> => {
   try {
     const lounge = await getDoc(doc(db, GLOBAL_COLLECTIONS.STORES, storeId));
     if (lounge.data()?.operations?.enabled) return await managedCheckin(userId, storeId);
@@ -238,7 +244,8 @@ export const createVisitSession = async (
     return { success: true, sessionId: docRef.id };
   } catch (error: any) {
     console.error('[createVisitSession] 创建失败:', error);
-    return { success: false, error: error.message || '创建驻店记录失败' };
+    return { success: false, error: error.message || '创建驻店记录失败',
+      ...(typeof error.code === 'string' ? { errorCode: error.code } : {}) };
   }
 };
 
@@ -1227,6 +1234,50 @@ export const subscribeToVisitSession = (
 /**
  * 获取用户的所有驻店记录
  */
+export interface AdminVisitPageOptions {
+  scope: AdminStoreScope;
+  userId?: string;
+  status?: 'all' | 'pending' | 'completed' | 'expired';
+  pageSize?: number;
+  from?: Date;
+  to?: Date;
+  cursor?: { phase: number; last?: QueryDocumentSnapshot; key: string };
+}
+
+export const getVisitSessionsPage = async (options: AdminVisitPageOptions) => {
+  await requireAdminVisitPagination();
+  if (!options.scope.allStores && !options.scope.storeId?.trim()) throw new Error('STORE_SCOPE_REQUIRED');
+  const size = Math.max(1, Math.min(100, Math.floor(options.pageSize || 20)));
+  const status = options.status || 'all';
+  const key = JSON.stringify([options.scope, options.userId || '', status, size, options.from, options.to]);
+  if (options.cursor && options.cursor.key !== key) throw new Error('CURSOR_SCOPE_MISMATCH');
+  const phases = status === 'all' ? [['pending'], ['completed', 'expired']] : [[status]];
+  let phase = options.cursor?.phase || 0;
+  let last = options.cursor?.last;
+  const records: VisitSession[] = [];
+  while (phase < phases.length) {
+    const constraints: QueryConstraint[] = [
+      where('status', phases[phase].length === 1 ? '==' : 'in', phases[phase].length === 1 ? phases[phase][0] : phases[phase]),
+      orderBy('checkInAt', 'desc'), orderBy(documentId(), 'desc'), limit(size - records.length + 1),
+    ];
+    if (!options.scope.allStores) constraints.push(where('storeId', '==', options.scope.storeId));
+    if (options.userId) constraints.push(where('userId', '==', options.userId));
+    if (options.from) constraints.push(where('checkInAt', '>=', options.from));
+    if (options.to) constraints.push(where('checkInAt', '<=', options.to));
+    if (last) constraints.push(startAfter(last));
+    const snapshot = await getDocs(withMonitoringOperation(query(collection(db, GLOBAL_COLLECTIONS.VISIT_SESSIONS), ...constraints), 'visitSessions.historyPage'));
+    const remaining = size - records.length;
+    const selected = snapshot.docs.slice(0, remaining);
+    records.push(...selected.map(entry => processVisitSessionData(entry.data(), entry.id)));
+    if (snapshot.docs.length > remaining) {
+      return { records, next: { phase, last: selected.at(-1) || last, key } };
+    }
+    phase++;
+    last = undefined;
+  }
+  return { records, next: undefined };
+};
+
 export const getUserVisitSessions = async (
   userId: string,
   limitCount?: number,

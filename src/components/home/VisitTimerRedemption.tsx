@@ -1,16 +1,16 @@
 // 合并后的驻店计时器和兑换模块组件
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Card, Typography, Space, Image, App, Modal, List, Tag, Row, Col, Select, Alert, Button, Spin } from 'antd';
 import { ClockCircleOutlined, GiftOutlined, PictureOutlined, ShoppingCartOutlined, ReloadOutlined, WalletOutlined, LoadingOutlined } from '@ant-design/icons';
 import { useAuthStore } from '../../store/modules/auth';
 import { getPendingVisitSession, processSessionRealtimeDeduction, subscribeToVisitSession } from '../../services/firebase/visitSessions';
-import { getUserRedemptionLimits, canUserRedeem, getDailyRedemptions, getTotalRedemptions, getHourlyRedemptions, getRedemptionConfig, createRedemptionRecord, subscribeToRedemptionRecordsBySession } from '../../services/firebase/redemption';
+import { canUserRedeem, getDailyRedemptions, getTotalRedemptions, getHourlyRedemptions, getRedemptionConfig, createRedemptionRecord, subscribeToRedemptionRecordsBySession } from '../../services/firebase/redemption';
 import { getUserMembershipPeriod } from '../../services/firebase/membershipFee';
 import { activateMembership, createMembershipPayment, getMembershipPaymentQuote, type MembershipPaymentQuote } from '../../services/membershipActivation';
 import { getUserData } from '../../services/firebase/auth';
 import StoreSelect from '../common/StoreSelect';
 import { useNavigate } from 'react-router-dom';
-import type { VisitSession, AppConfig } from '../../types';
+import type { VisitSession, AppConfig, RedemptionRecord } from '../../types';
 import { getAppConfig } from '../../services/firebase/appConfig';
 import { useTranslation } from 'react-i18next';
 import dayjs from 'dayjs';
@@ -22,6 +22,9 @@ import { doc, onSnapshot } from 'firebase/firestore';
 import { db } from '../../config/firebase';
 import { GLOBAL_COLLECTIONS } from '../../config/globalCollections';
 import { subscribeToRedemptionStats, type RedemptionStatsState } from '../../services/firebase/redemptionStats';
+import { subscribeToVisitMemberStats, type VisitMemberStatsState } from '../../services/firebase/visitMemberStats';
+import { memberVisitRedemptionLimits } from '../../utils/memberVisitStats';
+import { startVisiblePolling } from '../../utils/visiblePolling';
 
 const { Title, Text } = Typography;
 
@@ -55,7 +58,23 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
   const [redemptionStatus, setRedemptionStatus] = useState({ userId: '', loading: true, error: false });
 
   const [cutoffTime, setCutoffTime] = useState('23:00');
-  const [totalHours, setTotalHours] = useState(0);
+  const [visitStats, setVisitStats] = useState<VisitMemberStatsState>({ userId: '', status: 'loading', completedHours: null });
+  const [visitStatsRetry, setVisitStatsRetry] = useState(0);
+  const visitStatsRef = useRef(visitStats);
+  const totalHours = visitStats.userId === user?.id && visitStats.status === 'ready' ? visitStats.completedHours : null;
+  useEffect(() => {
+    if (!user?.id) return;
+    return subscribeToVisitMemberStats(user.id, value => {
+      visitStatsRef.current = value;
+      setVisitStats(value);
+    });
+  }, [user?.id, visitStatsRetry]);
+  const dataRequest = useRef<{ userId: string; promise: Promise<void> } | null>(null);
+  const loadDataRef = useRef<(refreshHistory?: boolean) => Promise<void>>(async () => {});
+  const redemptionSnapshot = useRef<{
+    userId: string; hourKey: string;
+    daily: RedemptionRecord[]; total: RedemptionRecord[]; hourly: RedemptionRecord[];
+  } | null>(null);
   const [canRedeemThisHour, setCanRedeemThisHour] = useState(true);
   const [countdownSeconds, setCountdownSeconds] = useState<number | null>(null); // 倒计时剩余秒数
   const [annualFeeAmount, setAnnualFeeAmount] = useState<number | null>(null); // 年费金额
@@ -194,45 +213,49 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
     };
   }, [countdownSeconds, user?.id]);
 
-  // 加载驻店会话数据
   useEffect(() => {
+    setLastCheckIn(user?.membership?.lastCheckInAt || null);
+  }, [user?.id, user?.membership?.lastCheckInAt]);
+
+  // Keep billing ticks until the server guarantees deductions for every visit path.
+  useEffect(() => {
+    let active = true;
     if (!user?.id) {
       setCurrentSession(null);
-      setLastCheckIn(user?.membership?.lastCheckInAt || null);
       return;
     }
-
+    const userId = user.id;
+    setCurrentSession(null);
     const loadSession = async () => {
-      const session = await getPendingVisitSession(user.id);
+      const session = await getPendingVisitSession(userId);
+      if (!active) return;
       setCurrentSession(session);
-      setLastCheckIn(user.membership?.lastCheckInAt || null);
 
       // 实时扣费：检查是否到了下一个扣费时间点
       if (session?.realtimeDeductionsEnabled && session.nextDeductionAt && session.id) {
         const now = new Date();
         if (now >= new Date(session.nextDeductionAt)) {
-          processSessionRealtimeDeduction(session.id, user.id).catch(e =>
+          await processSessionRealtimeDeduction(session.id, userId).catch(e =>
             console.error('[VisitTimerRedemption] 实时扣费失败', e)
           );
         }
       }
     };
 
-    loadSession();
-    const interval = setInterval(loadSession, 10000); // 每10秒刷新一次
-
-    return () => clearInterval(interval);
-  }, [user]);
+    const stop = startVisiblePolling(loadSession, 10000);
+    return () => { active = false; stop(); };
+  }, [user?.id]);
 
   // Check-out 余额不足时，监听会话状态以即时同步 Reload 状态。
   useEffect(() => {
     if (!currentSession?.id) return;
-
-    return subscribeToVisitSession(
+    let active = true;
+    const stop = subscribeToVisitSession(
       currentSession.id,
-      session => setCurrentSession(session),
+      session => { if (active) setCurrentSession(session); },
       error => console.warn('[VisitTimerRedemption] 会话实时监听失败', error)
     );
+    return () => { active = false; stop(); };
   }, [currentSession?.id]);
 
   useEffect(() => {
@@ -278,29 +301,6 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
     return () => clearInterval(interval);
   }, [currentSession]);
 
-  // 获取当前会员期限内的累计驻店时长
-  const loadTotalHours = async (): Promise<number> => {
-    if (!user?.id) {
-      setTotalHours(0);
-      return 0;
-    }
-    const userId = user.id;
-    try {
-      const { getUserVisitSessions } = await import('../../services/firebase/visitSessions');
-      const sessions = await getUserVisitSessions(userId);
-
-      const allHours = sessions
-        .filter(s => s.status === 'completed' && s.durationHours && s.checkInType !== 'daypass')
-        .reduce((sum, s) => sum + (s.durationHours || 0), 0);
-      setTotalHours(allHours);
-      return allHours;
-    } catch (error) {
-      console.error('[loadTotalHours] Error:', error);
-      setTotalHours(0);
-      return 0;
-    }
-  };
-
   // 加载应用配置
   useEffect(() => {
     const loadAppConfig = async () => {
@@ -325,41 +325,58 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
   }, [currentSession?.storeId]);
 
   // 加载兑换数据和时长数据
-  const loadData = async () => {
-    if (!user?.id) {
-      setTotalHours(0);
-      return;
-    }
+  const loadData = (refreshHistory = true): Promise<void> => {
+    if (!user?.id) return Promise.resolve();
     const userId = user.id;
+    if (dataRequest.current?.userId === userId) {
+      if (refreshHistory) return dataRequest.current.promise.then(() => loadDataRef.current(true));
+      return dataRequest.current.promise;
+    }
+    const isCurrent = () => useAuthStore.getState().user?.id === userId;
+    const promise = (async () => {
     setRedemptionStatus({ userId, loading: true, error: false });
     let failed = false;
     try {
-      // 加载累计驻店时长
-      await loadTotalHours();
-
-      const userLimits = await getUserRedemptionLimits(userId);
-
-      setLimits({
-        dailyLimit: userLimits.dailyLimit,
-        totalLimit: userLimits.totalLimit,
-        hourlyLimit: userLimits.hourlyLimit
-      });
-
-      const config = await getRedemptionConfig();
+      const summary = visitStatsRef.current;
+      if (summary.userId !== userId || summary.status !== 'ready' || summary.completedHours === null) {
+        throw new Error('VISIT_STATS_NOT_READY');
+      }
+      const today = new Date().toISOString().split('T')[0];
+      const hourKey = new Date().toISOString().split(':')[0];
+      const cached = redemptionSnapshot.current;
+      // These helpers scan source documents. Refresh the whole snapshot only on
+      // invalidation or a UTC hour boundary, preserving each helper's exclusions.
+      const history = !refreshHistory && cached?.userId === userId && cached.hourKey === hourKey
+        ? Promise.resolve(cached)
+        : Promise.all([
+          getDailyRedemptions(userId, today, { throwOnError: true }),
+          getTotalRedemptions(userId, { throwOnError: true }),
+          getHourlyRedemptions(userId, hourKey, { throwOnError: true }),
+        ]).then(([daily, total, hourly]) => {
+          const value = { userId, hourKey, daily, total, hourly };
+          if (isCurrent()) redemptionSnapshot.current = value;
+          return value;
+        });
+      const [config, records] = await Promise.all([getRedemptionConfig(), history]);
+      const { daily: dailyRedemptionsData, total: totalRedemptions, hourly: hourlyRedemptions } = records;
+      if (!isCurrent()) return;
+      const latest = visitStatsRef.current;
+      if (latest.userId !== userId || latest.status !== 'ready' || latest.completedHours === null) {
+        throw new Error('VISIT_STATS_NOT_READY');
+      }
+      const userLimits = memberVisitRedemptionLimits(latest.completedHours, config);
+      setLimits(userLimits);
       if (config) {
         setCutoffTime(config.cutoffTime);
       }
 
       // 获取当日兑换记录（待处理申请也占用限额）
-      const today = new Date().toISOString().split('T')[0];
-      const dailyRedemptionsData = await getDailyRedemptions(userId, today, { throwOnError: true });
       setDailyRedemptions(dailyRedemptionsData);
       const dailyCountValue = dailyRedemptionsData.reduce((sum, r) => sum + r.quantity, 0);
       setDailyCount(dailyCountValue);
 
 
       // 获取总兑换记录（待处理申请也占用限额）
-      const totalRedemptions = await getTotalRedemptions(userId, { throwOnError: true });
 
       // Firestore is authoritative so every device shares the same cooldown.
       const sharedCooldown = getRedemptionCooldownSeconds(totalRedemptions);
@@ -373,9 +390,6 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
       }
 
       // 获取本小时兑换记录（用于检查每小时限制）
-      const now = new Date();
-      const hourKey = now.toISOString().split(':')[0]; // YYYY-MM-DDTHH
-      const hourlyRedemptions = await getHourlyRedemptions(userId, hourKey, { throwOnError: true });
       const currentHourlyCount = hourlyRedemptions.reduce((sum, r) => sum + r.quantity, 0);
       setHourlyCount(currentHourlyCount);
 
@@ -387,7 +401,7 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
       try {
         const { getPointsConfig } = await import('../../services/firebase/pointsConfig');
         const pointsConfig = await getPointsConfig();
-        if (pointsConfig?.dayPass) {
+        if (isCurrent() && pointsConfig?.dayPass) {
           setDayPassConfig(pointsConfig.dayPass);
         }
       } catch (e) {
@@ -396,9 +410,16 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
     } catch (error) {
       failed = true;
     } finally {
-      setRedemptionStatus({ userId, loading: false, error: failed });
+      if (isCurrent()) setRedemptionStatus({ userId, loading: false, error: failed });
     }
+    })();
+    dataRequest.current = { userId, promise };
+    void promise.finally(() => {
+      if (dataRequest.current?.promise === promise) dataRequest.current = null;
+    });
+    return promise;
   };
+  loadDataRef.current = loadData;
 
   // 任一设备提交或确认兑换后，立即同步所有设备上的额度与冷却状态。
   useEffect(() => {
@@ -411,7 +432,10 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
         isInitialSnapshot = false;
         return;
       }
-      void loadData();
+      // A change during a read needs a fresh pass, not the in-flight snapshot.
+      const pending = dataRequest.current?.promise;
+      if (pending) void pending.then(() => loadDataRef.current(true));
+      else void loadDataRef.current(true);
     });
   }, [user?.id, currentSession?.id]);
 
@@ -433,11 +457,9 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
 
   // 加载兑换数据和时长数据
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 60000); // 每60秒刷新一次
-
-    return () => clearInterval(interval);
-  }, [user]);
+    if (!user?.id) return;
+    return startVisiblePolling(reason => loadDataRef.current(reason === 'resume'), 60000);
+  }, [user?.id, visitStats.status, visitStats.completedHours]);
 
   // 开通会员
   const handleActivateMembership = async () => {
@@ -581,14 +603,15 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
   const isBeforeCutoff = now < cutoff;
 
   // 计算合并后的进度条数据
-  const hoursText = formatHours(totalHours);
+  const hoursText = totalHours === null ? '-' : formatHours(totalHours);
   // 使用后端返回的限额，而不是前端计算值（确保与里程碑奖励逻辑一致）
-  const currentCigarLimit = limits.totalLimit; // 使用 getUserRedemptionLimits 返回的 totalLimit
+  const currentCigarLimit = totalHours === null || redemptionStatus.userId !== user.id
+    || redemptionStatus.loading || redemptionStatus.error ? '-' : limits.totalLimit;
 
   // 计算「距下一个里程碑」的进度（每50小时一个里程碑，无上限）
-  const prevMilestone = Math.floor(totalHours / 50) * 50; // 上一个已达成的里程碑（0, 50, 100, ...）
+  const prevMilestone = totalHours === null ? 0 : Math.floor(totalHours / 50) * 50;
   const nextMilestone = prevMilestone + 50; // 下一个待达成的里程碑
-  const milestoneProgress = ((totalHours - prevMilestone) / 50) * 100; // 在当前区间内的百分比
+  const milestoneProgress = totalHours === null ? 0 : ((totalHours - prevMilestone) / 50) * 100;
 
   return (
     <Card
@@ -761,10 +784,13 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
                 buttonStyle.opacity = 0.5;
                 buttonIcon = <ShoppingCartOutlined />;
               }
-              else if (checkingRedemptions || redemptionStatus.error) {
+              else if (checkingRedemptions || redemptionStatus.error || totalHours === null) {
                 buttonText = t(checkingRedemptions ? 'common.loading' : 'common.retry');
                 buttonIcon = checkingRedemptions ? <LoadingOutlined spin /> : <ReloadOutlined />;
-                buttonOnClick = () => loadData();
+                buttonOnClick = () => {
+                  if (totalHours === null) setVisitStatsRetry(value => value + 1);
+                  else void loadData();
+                };
                 isDisabled = checkingRedemptions;
                 buttonStyle.opacity = isDisabled ? 0.5 : 1;
               }
@@ -928,10 +954,10 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
                 {/* 进度条标签行：上一里程碑 ← → 下一里程碑 */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                   <Text style={{ fontSize: 11, color: prevMilestone > 0 ? '#C48D3A' : '#6b7280', fontWeight: 500 }}>
-                    {prevMilestone > 0 ? `${prevMilestone}h ✓` : '0h'}
+                    {totalHours === null ? '-' : prevMilestone > 0 ? `${prevMilestone}h ✓` : '0h'}
                   </Text>
                   <Text style={{ fontSize: 11, color: '#FDE08D', fontWeight: 600 }}>
-                    🏆 {nextMilestone}h
+                    {totalHours === null ? '-' : `🏆 ${nextMilestone}h`}
                   </Text>
                 </div>
                 {/* 进度条 */}
@@ -949,7 +975,7 @@ export const VisitTimerRedemption: React.FC<VisitTimerRedemptionProps> = ({ styl
                 {/* 进度文字 */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
                   <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
-                    {formatHours(totalHours - prevMilestone)} / 50 {t('visitTimer.hours')}
+                    {totalHours === null ? '-' : formatHours(totalHours - prevMilestone)} / 50 {t('visitTimer.hours')}
                   </Text>
                   <Text style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)' }}>
                     +25 {t('visitTimer.cigars')}

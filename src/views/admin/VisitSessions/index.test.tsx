@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
   cigars: vi.fn(),
   recentSessions: vi.fn(),
+  redemptionPages: vi.fn(),
   checkout: vi.fn(),
   confirm: vi.fn(),
   warning: vi.fn(),
@@ -27,11 +28,13 @@ vi.mock('../../../services/firebase/firestore', () => ({
   getCigars: mocks.cigars, getDocument: async () => null, COLLECTIONS: { USERS: 'users' },
 }));
 vi.mock('../../../services/firebase/visitSessions', () => ({
+  getVisitSessionsPage: async () => ({ records: await mocks.recentSessions(), next: undefined }),
   getUserVisitSessions: async () => [], getAllPendingVisitSessions: async () => [],
   getAllVisitSessions: mocks.recentSessions, getExpiredVisitSessions: async () => [],
   completeVisitSession: mocks.checkout, addRedemptionToSession: vi.fn(),
 }));
 vi.mock('../../../services/firebase/redemption', () => ({
+  getRedemptionRecordsPage: mocks.redemptionPages,
   createRedemptionRecord: vi.fn(), updateRedemptionRecord: vi.fn(),
   getRedemptionRecordsBySession: async () => [],
   getAllRedemptionRecords: async () => [{
@@ -52,6 +55,10 @@ describe('visit session redemption cigar loading', () => {
   beforeEach(() => {
     mocks.cigars.mockReset();
     mocks.recentSessions.mockReset().mockResolvedValue([]);
+    mocks.redemptionPages.mockReset().mockResolvedValue({ records: [{
+      id: 'pending', userId: 'member', userName: 'Member', cigarName: '',
+      quantity: 1, status: 'pending', redeemedAt: new Date(), visitSessionId: 'visit',
+    }], next: undefined });
     mocks.checkout.mockReset();
     mocks.confirm.mockReset();
     mocks.warning.mockReset();
@@ -62,6 +69,15 @@ describe('visit session redemption cigar loading', () => {
     });
   });
   afterEach(cleanup);
+
+  it('loads redemption sources only after opening their tab', async () => {
+    mocks.cigars.mockResolvedValue([]);
+    render(<VisitSessionsPage />);
+    await waitFor(() => expect(mocks.recentSessions).toHaveBeenCalled());
+    expect(mocks.redemptionPages).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('tab', { name: /visitSessions.mysteryGiftRedemptions/ }));
+    await waitFor(() => expect(mocks.redemptionPages).toHaveBeenCalledTimes(1));
+  }, 60000);
 
   it.each([true, false])('uses a persistent modal only for insufficient points (insufficient: %s)', async insufficient => {
     mocks.cigars.mockResolvedValue([]);

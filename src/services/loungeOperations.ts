@@ -20,7 +20,9 @@ export async function loungeRequest(action: string, data: Record<string, unknown
   }
   if (!response.ok || !result.success) {
     const key = `loungeOperations.errors.${typeof result.code === 'string' ? result.code : 'service-unavailable'}`;
-    throw new Error(i18n.t(i18n.exists(key) ? key : 'loungeOperations.error'));
+    throw Object.assign(new Error(i18n.t(i18n.exists(key) ? key : 'loungeOperations.error')), {
+      code: i18n.exists(key) && typeof result.code === 'string' ? result.code : 'service-unavailable',
+    });
   }
   return result;
 }

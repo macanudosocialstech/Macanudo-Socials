@@ -814,6 +814,7 @@ export interface MembershipFeeRecord {
 
 // 充值记录
 export interface ReloadRecord {
+  reviewAction?: 'approve' | 'reject' | 'cancel';
   membershipOrderId?: string;
   paymentMethod?: 'manual' | 'billplz';
   paymentPurpose?: 'initial_package' | 'renewal_reload' | 'annual_pass';

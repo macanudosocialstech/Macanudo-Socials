@@ -11,6 +11,7 @@ import { getUserByMemberId } from '../../utils/memberId';
 import { useAuthStore } from '../../store/modules/auth';
 import { useTranslation } from 'react-i18next';
 import { getActiveStores } from '../../services/firebase/stores';
+import { visitActionError } from '../../utils/visitActionError';
 import type { Cigar, RedemptionRecord, Store, User, VisitSession } from '../../types';
 
 const { Text } = Typography;
@@ -251,20 +252,6 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ active, onSuccess,
       return t('scanner.memberNotFound');
     }
     return t('scanner.memberLookupFailed');
-  };
-
-  const localizeVisitError = (error: string | undefined, fallbackKey: string) => {
-    if (!error) return t(fallbackKey);
-    if (/(Firestore索引|index.*required)/i.test(error)) return t('scanner.systemConfigurationError');
-    if (/(用户不存在|member.*not found)/i.test(error)) return t('scanner.memberNotFound');
-    if (/(驻店记录不存在|visit.*not found)/i.test(error)) return t('scanner.visitNotFound');
-    if (/(会员状态|开通会员|membership.*inactive)/i.test(error)) return t('scanner.membershipRequired');
-    if (/(已有未完成|active visit already exists)/i.test(error)) return t('scanner.activeVisitAlreadyExists');
-    if (/(积分不足|insufficient points)/i.test(error)) return t('scanner.insufficientPoints');
-    if (/(已完成|已过期|already completed|expired)/i.test(error)) return t('scanner.visitAlreadyClosed');
-    if (/(原会所|原门店|original lounge|original store)/i.test(error)) return t('scanner.visitStoreRestricted');
-    if (/(雪茄不存在|兑换|库存|redemption|inventory)/i.test(error)) return t('scanner.visitSettlementFailed');
-    return t(fallbackKey);
   };
 
   useEffect(() => {
@@ -600,7 +587,7 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ active, onSuccess,
           scannedMember.user.displayName
         );
         if (!result.success) {
-          throw new Error(localizeVisitError(result.error, 'scanner.checkinFailed'));
+          throw Object.assign(new Error(visitActionError(result.error, t, result.errorCode)), { code: result.errorCode });
         }
         message.success(t('scanner.checkinSuccess', { sessionId: result.sessionId }));
       } else {
@@ -610,13 +597,13 @@ export const QRScannerView: React.FC<QRScannerViewProps> = ({ active, onSuccess,
           scannedMember.pendingSession!.storeId
         );
         if (!result.success) {
-          throw new Error(localizeVisitError(result.error, 'common.checkoutFailed'));
+          throw new Error(visitActionError(result.error, t));
         }
         message.success(t('scanner.checkoutSuccess', { points: result.pointsDeducted || 0 }));
       }
       onSuccess?.();
     } catch (error: any) {
-      const errorMessage = error?.message || t('scanner.processFailed');
+      const errorMessage = visitActionError(error, t);
       setCheckInError(errorMessage);
       message.error(errorMessage);
       processingRef.current = false;

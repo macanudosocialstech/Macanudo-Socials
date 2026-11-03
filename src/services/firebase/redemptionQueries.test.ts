@@ -4,8 +4,10 @@ vi.mock('../../config/firebase', () => ({ db: {} }));
 vi.mock('./membershipFee', () => ({ getUserMembershipPeriod: async () => null }));
 vi.mock('@/services/firebase/monitoredFirestore', () => ({
   doc: vi.fn(), getDoc: vi.fn(), setDoc: vi.fn(), addDoc: vi.fn(), updateDoc: vi.fn(), getDocs: m.getDocs,
+  getDocFromServer: vi.fn(),
   collection: vi.fn(), query: vi.fn(), where: vi.fn(), orderBy: vi.fn(), limit: vi.fn(), Timestamp: {},
   documentId: vi.fn(), startAfter: vi.fn(),
+  withMonitoringOperation: (ref: unknown) => ref,
   arrayUnion: vi.fn(), runTransaction: vi.fn(), FieldValue: {}, onSnapshot: vi.fn(),
 }));
 import { getDailyRedemptions, getHourlyRedemptions, getTotalRedemptions } from './redemption';

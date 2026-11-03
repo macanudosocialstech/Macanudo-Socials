@@ -5,6 +5,8 @@ const m = vi.hoisted(() => ({
   user: { id: 'user', status: 'active', membership: { points: 1000 } } as any,
   session: null as any, sessionListener: null as any, daily: vi.fn(), navigate: vi.fn(),
   pending: { request: null, loading: false, error: null, retry: vi.fn() } as any,
+  visitStats: { status: 'ready', completedHours: 50 } as any, visitStatsListener: null as any,
+  history: vi.fn(), legacyLimits: vi.fn(), getSession: vi.fn(), deduct: vi.fn(), total: vi.fn(), redemptionListener: null as any,
 }));
 vi.mock('antd', () => {
   const Box = ({ children }: any) => <div>{children}</div>;
@@ -21,21 +23,27 @@ vi.mock('@ant-design/icons', () => {
     ReloadOutlined: Icon, WalletOutlined: Icon, LoadingOutlined: Icon };
 });
 vi.mock('react-router-dom', () => ({ useNavigate: () => m.navigate }));
-vi.mock('../../store/modules/auth', () => ({ useAuthStore: () => ({ user: m.user, setUser: vi.fn() }) }));
+vi.mock('../../store/modules/auth', () => ({ useAuthStore: Object.assign(
+  () => ({ user: m.user, setUser: vi.fn() }), { getState: () => ({ user: m.user }) }) }));
 vi.mock('../../hooks/usePendingPayments', () => ({ usePendingPayments: () => m.pending }));
 vi.mock('../../services/firebase/redemptionStats', () => ({ subscribeToRedemptionStats: (userId: string, callback: any) => {
   callback({ userId, status: 'ready', completedQuantity: 12, pendingQuantity: 2 }); return () => {};
 } }));
 vi.mock('../../services/firebase/visitSessions', () => ({
-  getPendingVisitSession: async () => m.session, getUserVisitSessions: async () => [], processSessionRealtimeDeduction: vi.fn(),
+  getPendingVisitSession: m.getSession, getUserVisitSessions: m.history, processSessionRealtimeDeduction: m.deduct,
   subscribeToVisitSession: (_id: string, callback: any) => { m.sessionListener = callback; return () => {}; },
 }));
 vi.mock('../../services/firebase/redemption', () => ({
-  getUserRedemptionLimits: async () => ({ dailyLimit: 3, totalLimit: 25 }),
-  getDailyRedemptions: m.daily, getTotalRedemptions: async () => [], getHourlyRedemptions: async () => [],
+  getUserRedemptionLimits: m.legacyLimits,
+  getDailyRedemptions: m.daily, getTotalRedemptions: m.total, getHourlyRedemptions: async () => [],
   getRedemptionConfig: async () => ({ cutoffTime: '23:59' }), canUserRedeem: vi.fn(), createRedemptionRecord: vi.fn(),
-  subscribeToRedemptionRecordsBySession: () => () => {},
+  subscribeToRedemptionRecordsBySession: (_id: string, listener: any) => {
+    m.redemptionListener = listener; listener([]); return () => {};
+  },
 }));
+vi.mock('../../services/firebase/visitMemberStats', () => ({ subscribeToVisitMemberStats: (userId: string, callback: any) => {
+  m.visitStatsListener = callback; callback({ userId, ...m.visitStats }); return () => {};
+} }));
 vi.mock('../../services/firebase/membershipFee', () => ({ getCurrentAnnualFeeAmount: async () => 199, getUserMembershipPeriod: vi.fn() }));
 vi.mock('../../services/membershipActivation', () => ({ activateMembership: vi.fn(), createMembershipPayment: vi.fn(), getMembershipPaymentQuote: vi.fn() }));
 vi.mock('../../services/firebase/auth', () => ({ getUserData: vi.fn() }));
@@ -51,9 +59,13 @@ describe('visit entry button', () => {
     vi.clearAllMocks(); localStorage.clear(); m.session = null; m.sessionListener = null;
     m.user = { id: 'user', status: 'active', membership: { points: 1000 } };
     m.daily.mockResolvedValue([]);
+    m.getSession.mockImplementation(async () => m.session);
+    m.visitStats = { status: 'ready', completedHours: 50 };
+    m.deduct.mockResolvedValue(undefined);
+    m.total.mockResolvedValue([]);
     m.pending = { request: null, loading: false, error: null, retry: vi.fn() };
   });
-  afterEach(cleanup);
+  afterEach(() => { cleanup(); vi.useRealTimers(); });
   const checkedIn = () => ({ id: 'session', userId: 'user', status: 'pending', checkInAt: new Date(), storeId: 'store' });
   it('shows Reload outside a visit even when the daily quota is exhausted', async () => {
     m.daily.mockResolvedValue([{ quantity: 3 }]);
@@ -120,5 +132,43 @@ describe('visit entry button', () => {
     render(<VisitTimerRedemption />);
     expect(await screen.findByText('14')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'visitTimer.reload' })).toBeTruthy();
+  });
+  it('derives milestone limits from summary hours without direct or indirect history scans', async () => {
+    render(<VisitTimerRedemption />);
+    await waitFor(() => expect(m.daily).toHaveBeenCalledTimes(1));
+    expect(m.history).not.toHaveBeenCalled(); expect(m.legacyLimits).not.toHaveBeenCalled();
+    expect(await screen.findByText('/ 50 visitTimer.cigars')).toBeTruthy();
+  });
+  it('shows unavailable hours and blocks redemption until the projection is ready', async () => {
+    m.session = checkedIn(); m.visitStats = { status: 'initializing', completedHours: null };
+    render(<VisitTimerRedemption />);
+    await screen.findByRole('button', { name: 'common.retry' });
+    expect(m.daily).not.toHaveBeenCalled(); expect(m.history).not.toHaveBeenCalled();
+    expect(screen.queryByText('0')).toBeNull();
+    act(() => m.visitStatsListener({ userId: 'user', status: 'ready', completedHours: 50 }));
+    await screen.findByRole('button', { name: 'visitTimer.redeem' });
+  });
+  it('does not re-read visits when unrelated user fields change and still performs due deductions', async () => {
+    m.session = { ...checkedIn(), realtimeDeductionsEnabled: true, nextDeductionAt: new Date(Date.now() - 1000) };
+    const view = render(<VisitTimerRedemption />);
+    await waitFor(() => expect(m.deduct).toHaveBeenCalledTimes(1));
+    m.user = { ...m.user, membership: { points: 200 } }; view.rerender(<VisitTimerRedemption />);
+    expect(m.getSession).toHaveBeenCalledTimes(1);
+  });
+  it('reuses cooldown history on minute ticks and invalidates on session changes and visibility resume', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-18T03:10:00Z'));
+    m.session = checkedIn();
+    await act(async () => { render(<VisitTimerRedemption />); });
+    expect(m.total).toHaveBeenCalledTimes(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(120000); });
+    expect(m.total).toHaveBeenCalledTimes(1);
+    expect(m.daily).toHaveBeenCalledTimes(1);
+    await act(async () => { m.redemptionListener([]); });
+    expect(m.total).toHaveBeenCalledTimes(2);
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    expect(m.total).toHaveBeenCalledTimes(3);
+    await act(async () => { await vi.advanceTimersByTimeAsync(3600000); });
+    expect(m.total).toHaveBeenCalledTimes(4);
   });
 });
