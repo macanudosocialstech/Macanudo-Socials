@@ -71,6 +71,12 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
   }, []);
   const contact = guestContactUrl(config);
   const membership = currentGuestMembership(config);
+  const isOpen = (() => {
+    const p = (s: string) => { const parts = s.split(':'); return parseInt(parts[0] ?? '0', 10) * 60 + parseInt(parts[1] ?? '0', 10); };
+    const now = new Date();
+    const cur = now.getHours() * 60 + now.getMinutes();
+    return config.opensAt && config.closesAt ? cur >= p(config.opensAt) && cur < p(config.closesAt) : false;
+  })();
   return <div className="guest-lounge" ref={root}>
     <a className="guest-skip" href="#guest-main">{copy('skip')}</a>
     <header className="guest-header guest-gutter" ref={headerRef}>
@@ -139,7 +145,14 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
         </div>
       </section>
       <section id="visit" className="guest-visit guest-gutter guest-section">
-        <div className="guest-visit-title"><h2 data-guest-reveal>{copy('visitTitle')}</h2><p data-guest-reveal>{config.loungeName}</p></div>
+        <div className="guest-visit-title">
+          <h2 data-guest-reveal>{copy('visitTitle')}</h2>
+          <p data-guest-reveal>{config.loungeName}</p>
+          <div className="guest-status-badge" data-guest-reveal>
+            <span className={`guest-status-dot${isOpen ? ' guest-status-dot--open' : ''}`} aria-hidden="true" />
+            {isOpen ? copy('openNow') : copy('closedNow')}
+          </div>
+        </div>
         <div className="guest-visit-details" data-guest-reveal>
           <dl><div><dt>{copy('address')}</dt><dd><address>{config.address}</address></dd></div>
             <div><dt>{copy('hours')}</dt><dd>{t('guestPublic.visitHours', { hours: `${config.opensAt}–${config.closesAt}` })}</dd></div>
@@ -179,7 +192,7 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
         onClick={() => trackEvent('whatsapp_click', { section: 'footer' })}>{copy('planVisit')}</a>
 <p className="guest-copyright">© {new Date().getFullYear()} Macanudo Socials</p>
     </footer>
-    <div className={`guest-sticky-cta${stickyVisible ? ' guest-sticky-cta--visible' : ''}`} aria-hidden={!stickyVisible}>
+    <div className={`guest-sticky-cta${stickyVisible && !menuOpen ? ' guest-sticky-cta--visible' : ''}`} aria-hidden={!stickyVisible || menuOpen}>
       <a className="guest-cta" href={contact} target="_blank" rel="noopener noreferrer"
         onClick={() => trackEvent('whatsapp_click', { section: 'sticky' })}>{copy('planVisit')}</a>
     </div>
