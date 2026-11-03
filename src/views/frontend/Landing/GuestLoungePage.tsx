@@ -12,9 +12,9 @@ function trackEvent(name: string, params?: Record<string, string | number>) {
 
 const PHOTO = '/lounge/';
 const rooms = [
-  { key: 'quiet', photo: 'quiet-lounge.png' },
-  { key: 'table', photo: 'social-table.png' },
-  { key: 'window', photo: 'window-lounge.png' },
+  { key: 'quiet', photo: 'quiet-lounge.webp' },
+  { key: 'table', photo: 'social-table.webp' },
+  { key: 'window', photo: 'window-lounge.webp' },
 ] as const;
 
 function BrandLogo({ url, name }: { url?: string; name: string }) {
@@ -101,7 +101,9 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
       <section id="home" className="guest-hero">
         <div ref={heroSentinelRef} aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1 }} />
         <picture className="guest-hero-picture">
+          <source type="image/webp" media="(max-width: 640px)" srcSet={PHOTO + 'stone-wall-seating.webp'} />
           <source media="(max-width: 640px)" srcSet={PHOTO + 'stone-wall-seating.png'} />
+          <source type="image/webp" srcSet={PHOTO + 'lounge-hero.webp'} />
           <img src={PHOTO + 'lounge-hero.png'} alt={copy('heroAlt')} width="1360" height="1020" fetchPriority="high" />
         </picture>
         <div className="guest-hero-scrim" />
@@ -118,7 +120,7 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
         </div>
       </section>
       <section id="lounge" className="guest-about guest-gutter guest-section">
-        <img data-guest-reveal src={PHOTO + 'window-lounge.png'} alt={copy('windowAlt')} width="807" height="1020" loading="lazy" />
+        <img data-guest-reveal src={PHOTO + 'window-lounge.webp'} alt={copy('windowAlt')} width="807" height="1020" loading="lazy" />
         <div className="guest-about-copy">
           <h2 data-guest-reveal>{copy('aboutTitle')}</h2>
           <p data-guest-reveal>{copy('aboutBody')}</p>
@@ -139,9 +141,9 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
           </div>
         </div>
         <div className="guest-triptych">
-          <figure data-guest-reveal><img src={PHOTO + 'caramel-seating.png'} alt={copy('caramelAlt')} width="1360" height="1020" loading="lazy" /><figcaption>{copy('caramelCaption')}</figcaption></figure>
-          <figure data-guest-reveal><img src={PHOTO + 'drinks-corner.png'} alt={copy('drinksAlt')} width="1360" height="944" loading="lazy" /><figcaption>{copy('drinksCaption')}</figcaption></figure>
-          <figure data-guest-reveal><img src={PHOTO + 'screening-corner.png'} alt={copy('screenAlt')} width="765" height="1020" loading="lazy" /><figcaption>{copy('screenCaption')}</figcaption></figure>
+          <figure data-guest-reveal><img src={PHOTO + 'caramel-seating.webp'} alt={copy('caramelAlt')} width="1360" height="1020" loading="lazy" /><figcaption>{copy('caramelCaption')}</figcaption></figure>
+          <figure data-guest-reveal><img src={PHOTO + 'drinks-corner.webp'} alt={copy('drinksAlt')} width="1360" height="944" loading="lazy" /><figcaption>{copy('drinksCaption')}</figcaption></figure>
+          <figure data-guest-reveal><img src={PHOTO + 'screening-corner.webp'} alt={copy('screenAlt')} width="765" height="1020" loading="lazy" /><figcaption>{copy('screenCaption')}</figcaption></figure>
         </div>
       </section>
       <section id="visit" className="guest-visit guest-gutter guest-section">
