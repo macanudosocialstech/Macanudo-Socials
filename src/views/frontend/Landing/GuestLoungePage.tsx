@@ -39,7 +39,10 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
   const { t, i18n } = useTranslation();
   const copy = (key: string) => t(`guestLounge.${key}`);
   const [menuOpen, setMenuOpen] = useState(false), [room, setRoom] = useState(0);
+  const [stickyVisible, setStickyVisible] = useState(false);
   const root = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLElement>(null);
+  const heroSentinelRef = useRef<HTMLDivElement>(null);
   const selected = rooms[room];
   useEffect(() => {
     if (!window.IntersectionObserver) return;
@@ -54,11 +57,23 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
     if (menuOpen) document.addEventListener('keydown', close);
     return () => document.removeEventListener('keydown', close);
   }, [menuOpen]);
+  useEffect(() => {
+    const sentinel = heroSentinelRef.current;
+    const header = headerRef.current;
+    if (!window.IntersectionObserver || !sentinel) return;
+    const io = new IntersectionObserver(([entry]) => {
+      const past = !entry.isIntersecting;
+      header?.classList.toggle('guest-header--scrolled', past);
+      setStickyVisible(past);
+    }, { threshold: 0 });
+    io.observe(sentinel);
+    return () => io.disconnect();
+  }, []);
   const contact = guestContactUrl(config);
   const membership = currentGuestMembership(config);
   return <div className="guest-lounge" ref={root}>
     <a className="guest-skip" href="#guest-main">{copy('skip')}</a>
-    <header className="guest-header guest-gutter">
+    <header className="guest-header guest-gutter" ref={headerRef}>
       <a href="#home" aria-label={config.loungeName} className="guest-brand"><BrandLogo url={logoUrl} name={config.loungeName} /></a>
       <button className="guest-menu-toggle" type="button" aria-label={copy(menuOpen ? 'closeMenu' : 'openMenu')}
         aria-expanded={menuOpen} aria-controls="guest-navigation" onClick={() => setMenuOpen(v => !v)}>
@@ -78,6 +93,7 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
     </header>
     <main id="guest-main">
       <section id="home" className="guest-hero">
+        <div ref={heroSentinelRef} aria-hidden="true" style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1 }} />
         <picture className="guest-hero-picture">
           <source media="(max-width: 640px)" srcSet={PHOTO + 'stone-wall-seating.png'} />
           <img src={PHOTO + 'lounge-hero.png'} alt={copy('heroAlt')} width="1360" height="1020" fetchPriority="high" />
@@ -88,6 +104,11 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
           <p>{copy('heroBody')}</p>
           <a className="guest-cta" href={contact} target="_blank" rel="noopener noreferrer"
             onClick={() => trackEvent('whatsapp_click', { section: 'hero' })}>{copy('planVisit')}</a>
+          <div className="guest-hero-strip">
+            <strong>Kota Kinabalu</strong>
+            <span>{config.opensAt} - {config.closesAt}</span>
+            <span>{config.address.split(',')[0]}</span>
+          </div>
         </div>
       </section>
       <section id="lounge" className="guest-about guest-gutter guest-section">
@@ -158,5 +179,9 @@ export default function GuestLoungePage({ config, logoUrl, onRegister, onLogin }
         onClick={() => trackEvent('whatsapp_click', { section: 'footer' })}>{copy('planVisit')}</a>
 <p className="guest-copyright">© {new Date().getFullYear()} Macanudo Socials</p>
     </footer>
+    <div className={`guest-sticky-cta${stickyVisible ? ' guest-sticky-cta--visible' : ''}`} aria-hidden={!stickyVisible}>
+      <a className="guest-cta" href={contact} target="_blank" rel="noopener noreferrer"
+        onClick={() => trackEvent('whatsapp_click', { section: 'sticky' })}>{copy('planVisit')}</a>
+    </div>
   </div>;
 }
